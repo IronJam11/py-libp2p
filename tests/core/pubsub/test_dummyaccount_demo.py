@@ -159,7 +159,7 @@ async def test_set_then_send_from_diff_nodes_five_nodes_ring_topography():
 
     async def action_func(dummy_nodes):
         await dummy_nodes[0].publish_set_crypto("alex", 20)
-        await trio.sleep(1.0)  # Increased from 0.25 to allow proper ring propagation
+        await trio.sleep(1 * ((num_nodes - 1) / 2))
         await dummy_nodes[3].publish_send_crypto("alex", "rob", 12)
 
     def assertion_func(dummy_node):
