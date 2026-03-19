@@ -635,6 +635,88 @@ async def test_message_all_peers(monkeypatch, security_protocol):
 
 
 @pytest.mark.trio
+async def test_subscribe_announce_retries_on_queue_full(monkeypatch):
+    async with PubsubFactory.create_batch_with_gossipsub(1) as pubsubs_fsub:
+        pubsub = pubsubs_fsub[0]
+        peer_id = IDFactory()
+        queue = RpcQueue(max_size=1)
+        assert queue.push(rpc_pb2.RPC())
+
+        with monkeypatch.context() as m:
+            m.setattr(pubsub, "peers", {peer_id: object()})
+            m.setattr(pubsub, "peer_queues", {peer_id: queue})
+            m.setattr("libp2p.pubsub.pubsub.random.randint", lambda _a, _b: 0)
+
+            await pubsub.subscribe(TESTING_TOPIC)
+
+            # Free one slot; retry should enqueue subscribe announcement.
+            assert await queue.pop() is not None
+            with trio.fail_after(2):
+                retry_rpc = await queue.pop()
+
+        assert retry_rpc is not None
+        assert len(retry_rpc.subscriptions) == 1
+        assert retry_rpc.subscriptions[0].topicid == TESTING_TOPIC
+        assert retry_rpc.subscriptions[0].subscribe is True
+
+
+@pytest.mark.trio
+async def test_subscribe_announce_retry_stops_after_unsubscribe(monkeypatch):
+    async with PubsubFactory.create_batch_with_gossipsub(1) as pubsubs_fsub:
+        pubsub = pubsubs_fsub[0]
+        peer_id = IDFactory()
+        queue = RpcQueue(max_size=1)
+        assert queue.push(rpc_pb2.RPC())
+
+        with monkeypatch.context() as m:
+            m.setattr(pubsub, "peers", {peer_id: object()})
+            m.setattr(pubsub, "peer_queues", {peer_id: queue})
+            m.setattr("libp2p.pubsub.pubsub.random.randint", lambda _a, _b: 0)
+
+            await pubsub.subscribe(TESTING_TOPIC)
+            await pubsub.unsubscribe(TESTING_TOPIC)
+
+            # Free slot and ensure no stale subscribe retry is enqueued.
+            assert await queue.pop() is not None
+            with trio.move_on_after(0.2):
+                await queue.pop()
+            assert len(queue) == 0
+
+
+@pytest.mark.trio
+async def test_unsubscribe_announce_retries_on_queue_full(monkeypatch):
+    async with PubsubFactory.create_batch_with_gossipsub(1) as pubsubs_fsub:
+        pubsub = pubsubs_fsub[0]
+        peer_id = IDFactory()
+        queue = RpcQueue(max_size=1)
+
+        with monkeypatch.context() as m:
+            m.setattr(pubsub, "peers", {peer_id: object()})
+            m.setattr(pubsub, "peer_queues", {peer_id: queue})
+            m.setattr("libp2p.pubsub.pubsub.random.randint", lambda _a, _b: 0)
+
+            await pubsub.subscribe(TESTING_TOPIC)
+
+            # Drain any queued subscribe announce before preparing queue-full case.
+            while len(queue) > 0:
+                assert await queue.pop() is not None
+
+            # Fill queue so unsubscribe announce is dropped and scheduled for retry.
+            assert queue.push(rpc_pb2.RPC())
+            await pubsub.unsubscribe(TESTING_TOPIC)
+
+            # Free one slot; retry should enqueue unsubscribe announcement.
+            assert await queue.pop() is not None
+            with trio.fail_after(2):
+                retry_rpc = await queue.pop()
+
+        assert retry_rpc is not None
+        assert len(retry_rpc.subscriptions) == 1
+        assert retry_rpc.subscriptions[0].topicid == TESTING_TOPIC
+        assert retry_rpc.subscriptions[0].subscribe is False
+
+
+@pytest.mark.trio
 async def test_subscribe_and_publish():
     async with PubsubFactory.create_batch_with_gossipsub(1) as pubsubs_fsub:
         pubsub = pubsubs_fsub[0]
