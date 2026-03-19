@@ -257,9 +257,7 @@ class GossipSub(IPubsubRouter, Service):
         self._pending_messages_ttl = pending_messages_ttl
 
         # Deferred retry queue for dropped control chunks.
-        self._pending_control: dict[ID, rpc_pb2.ControlMessage] = defaultdict(
-            rpc_pb2.ControlMessage
-        )
+        self._pending_control = defaultdict(lambda: rpc_pb2.ControlMessage())
         self._max_pending_graft_prune_per_peer = 64
         # Extensions support (v1.3+)
         self.extension_handlers: dict[str, Callable[[bytes, ID], Awaitable[None]]] = {}
