@@ -94,6 +94,7 @@ from .validators import (
 SUBSCRIPTION_CHANNEL_SIZE = 32
 _ANNOUNCE_RETRY_MIN_DELAY_MS = 1
 _ANNOUNCE_RETRY_JITTER_MS = 1000
+_ANNOUNCE_RETRY_MAX_ATTEMPTS = 10
 
 logger = logging.getLogger(__name__)
 
@@ -787,6 +788,8 @@ class Pubsub(Service, IPubsub):
             return
         del self.peers[peer_id]
 
+        self._clear_pending_announce_retries_for_peer(peer_id)
+
         # Close the outbound queue so the sending task exits
         if peer_id in self.peer_queues:
             self.peer_queues.pop(peer_id).close()
@@ -798,6 +801,11 @@ class Pubsub(Service, IPubsub):
         self.router.remove_peer(peer_id)
 
         logger.debug("removed dead peer %s", peer_id)
+
+    def _clear_pending_announce_retries_for_peer(self, peer_id: ID) -> None:
+        self._pending_announce_retries = {
+            key for key in self._pending_announce_retries if key[0] != peer_id
+        }
 
     async def handle_peer_queue(self) -> None:
         """
@@ -1049,7 +1057,9 @@ class Pubsub(Service, IPubsub):
 
                 ok = queue.push(part)
                 if not ok:
-                    self._enqueue_or_retry_announce(peer_id, queue, part, announce)
+                    drop_rpc(peer_id, part)
+                    if announce is not None:
+                        self._schedule_announce_retry(peer_id, announce)
                     break
 
     def _enqueue_or_retry_announce(
@@ -1058,15 +1068,14 @@ class Pubsub(Service, IPubsub):
         queue: RpcQueue,
         rpc_msg: rpc_pb2.RPC,
         announce: rpc_pb2.RPC.SubOpts | None,
-    ) -> bool:
+    ) -> None:
         ok = queue.push(rpc_msg)
         if ok:
-            return True
+            return
 
         drop_rpc(peer_id, rpc_msg)
         if announce is not None:
             self._schedule_announce_retry(peer_id, announce)
-        return False
 
     def _schedule_announce_retry(
         self, peer_id: ID, announce: rpc_pb2.RPC.SubOpts
@@ -1087,7 +1096,10 @@ class Pubsub(Service, IPubsub):
     ) -> None:
         key = (peer_id, topic_id, subscribe)
         try:
-            while self.manager.is_running:
+            for _ in range(_ANNOUNCE_RETRY_MAX_ATTEMPTS):
+                if not self.manager.is_running:
+                    return
+
                 delay_ms = _ANNOUNCE_RETRY_MIN_DELAY_MS + random.randint(
                     0, _ANNOUNCE_RETRY_JITTER_MS - 1
                 )
